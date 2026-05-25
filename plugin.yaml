@@ -4,7 +4,7 @@ description: Persistent note-taking integration with PMOVES.AI Open Notebook (Su
 version: 1.0.0
 author: POWERFULMOVES
 license: MIT
-repository: https://github.com/POWERFULMOVES/a0-plugin-pmoves-notes
+repository: https://github.com/POWERFULMOVES/Pmoves-a0-plugin-pmoves-notes
 
 # PMOVES.AI Integration Requirements
 pmoves:
