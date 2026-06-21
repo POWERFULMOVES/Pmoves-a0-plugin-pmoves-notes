@@ -25,6 +25,20 @@ def _notebook_token() -> str:
     return os.getenv("OPEN_NOTEBOOK_API_TOKEN", "")
 
 
+def _build_headers(api_url: str, token: str) -> dict[str, str]:
+    """Build request headers, warning if a token would be sent over plaintext HTTP."""
+    headers = {"Content-Type": "application/json"}
+    if token:
+        if api_url.lower().startswith("http://"):
+            PrintStyle(font_color="yellow").print(
+                "[PMOVES.Notes] WARNING: OPEN_NOTEBOOK_API_TOKEN is set but "
+                "OPEN_NOTEBOOK_API_URL uses plaintext http:// — the bearer token "
+                "will be sent unencrypted. Use https:// for non-internal endpoints."
+            )
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 async def publish_nats_event(subject: str, data: dict[str, Any]) -> None:
     """Best-effort NATS publish; never raises into the caller."""
     try:
@@ -51,6 +65,8 @@ class SaveNote(Tool):
         tags: list[str] | None = None,
         **kwargs,
     ) -> Response:
+        if content is None:
+            content = ""
         content = content if isinstance(content, str) else str(content)
         if not content.strip():
             return Response(
@@ -75,17 +91,15 @@ class SaveNote(Tool):
             },
         }
 
-        headers = {"Content-Type": "application/json"}
-        token = _notebook_token()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        api_url = _notebook_api_url()
+        headers = _build_headers(api_url, _notebook_token())
 
         try:
             import aiohttp  # lazy import: keeps import errors out of tool discovery
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{_notebook_api_url()}/api/notes",
+                    f"{api_url}/api/notes",
                     json=note,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=10),
@@ -99,6 +113,12 @@ class SaveNote(Tool):
                     result = await resp.json()
         except Exception as exc:  # noqa: BLE001 — surface as tool message, never crash loop
             return Response(message=f"save_note error: {exc}", break_loop=False)
+
+        if not isinstance(result, dict):
+            return Response(
+                message="save_note failed: unexpected response shape (expected JSON object).",
+                break_loop=False,
+            )
 
         note_id = result.get("id", "unknown")
         await publish_nats_event(

@@ -24,6 +24,20 @@ def _notebook_token() -> str:
     return os.getenv("OPEN_NOTEBOOK_API_TOKEN", "")
 
 
+def _build_headers(api_url: str, token: str) -> dict[str, str]:
+    """Build request headers, warning if a token would be sent over plaintext HTTP."""
+    headers = {"Content-Type": "application/json"}
+    if token:
+        if api_url.lower().startswith("http://"):
+            PrintStyle(font_color="yellow").print(
+                "[PMOVES.Notes] WARNING: OPEN_NOTEBOOK_API_TOKEN is set but "
+                "OPEN_NOTEBOOK_API_URL uses plaintext http:// — the bearer token "
+                "will be sent unencrypted. Use https:// for non-internal endpoints."
+            )
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 async def publish_nats_event(subject: str, data: dict[str, Any]) -> None:
     """Best-effort NATS publish; never raises into the caller."""
     try:
@@ -50,8 +64,11 @@ class SearchNotes(Tool):
         tags: list[str] | None = None,
         **kwargs,
     ) -> Response:
+        if query is None:
+            query = ""
         query = query if isinstance(query, str) else str(query)
-        if not query.strip():
+        query = query.strip()
+        if not query:
             return Response(
                 message="search_notes error: 'query' is required.", break_loop=False
             )
@@ -64,17 +81,15 @@ class SearchNotes(Tool):
         if isinstance(tags, (list, tuple)) and tags:
             params["tags"] = list(tags)
 
-        headers = {"Content-Type": "application/json"}
-        token = _notebook_token()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        api_url = _notebook_api_url()
+        headers = _build_headers(api_url, _notebook_token())
 
         try:
             import aiohttp  # lazy import: keeps import errors out of tool discovery
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{_notebook_api_url()}/api/notes/search",
+                    f"{api_url}/api/notes/search",
                     params=params,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=10),
@@ -89,30 +104,39 @@ class SearchNotes(Tool):
         except Exception as exc:  # noqa: BLE001 — surface as tool message, never crash loop
             return Response(message=f"search_notes error: {exc}", break_loop=False)
 
-        notes = results.get("results", []) if isinstance(results, dict) else []
-        summary = [
-            {
-                "id": n.get("id"),
-                "title": n.get("title"),
-                "snippet": (
-                    (n.get("content", "")[:200] + "...")
-                    if len(n.get("content", "")) > 200
-                    else n.get("content", "")
-                ),
-                "tags": n.get("tags", []),
-                "timestamp": n.get("metadata", {}).get("timestamp"),
-            }
-            for n in notes
-        ]
+        raw_notes = results.get("results", []) if isinstance(results, dict) else []
+        if not isinstance(raw_notes, list):
+            raw_notes = []
+
+        summary = []
+        for n in raw_notes:
+            if not isinstance(n, dict):
+                continue
+            content = n.get("content") or ""
+            if not isinstance(content, str):
+                content = str(content)
+            metadata = n.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            tags_value = n.get("tags", [])
+            summary.append(
+                {
+                    "id": n.get("id"),
+                    "title": n.get("title"),
+                    "snippet": (content[:200] + "...") if len(content) > 200 else content,
+                    "tags": tags_value if isinstance(tags_value, list) else [],
+                    "timestamp": metadata.get("timestamp"),
+                }
+            )
 
         await publish_nats_event(
             "agent.notes.searched.v1",
             {
                 "query": query,
-                "results_count": len(notes),
+                "results_count": len(summary),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
 
-        body = json.dumps({"query": query, "count": len(notes), "results": summary}, indent=2)
+        body = json.dumps({"query": query, "count": len(summary), "results": summary}, indent=2)
         return Response(message=f"search_notes results:\n{body}", break_loop=False)

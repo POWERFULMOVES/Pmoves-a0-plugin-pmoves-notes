@@ -68,9 +68,16 @@ async def _save_conversation(agent_name: str, content: str) -> None:
         },
     }
 
-    headers = {"Content-Type": "application/json"}
+    api_url = _notebook_api_url()
     token = _notebook_token()
+    headers = {"Content-Type": "application/json"}
     if token:
+        if api_url.lower().startswith("http://"):
+            PrintStyle(font_color="yellow").print(
+                "[PMOVES.Notes] WARNING: OPEN_NOTEBOOK_API_TOKEN is set but "
+                "OPEN_NOTEBOOK_API_URL uses plaintext http:// — the bearer token "
+                "will be sent unencrypted. Use https:// for non-internal endpoints."
+            )
         headers["Authorization"] = f"Bearer {token}"
 
     try:
@@ -78,7 +85,7 @@ async def _save_conversation(agent_name: str, content: str) -> None:
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{_notebook_api_url()}/api/notes",
+                f"{api_url}/api/notes",
                 json=note,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=10),

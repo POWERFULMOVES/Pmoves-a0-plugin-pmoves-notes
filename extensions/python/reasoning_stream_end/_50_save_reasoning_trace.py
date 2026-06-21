@@ -1,9 +1,10 @@
-"""PMOVES.Notes extension — save reasoning traces to memory.
+"""PMOVES.Notes extension — persist the agent's reasoning trace.
 
-Runs at ``monologue_end``. Sources the reasoning text from
-``loop_data.last_response`` (the agent's final response for the iteration),
-not from a synthetic payload. Persists in a background task so it never blocks
-the agent.
+Runs at ``reasoning_stream_end`` (fired after the chat model call completes).
+Reads the full reasoning stashed by the ``reasoning_stream`` capture hook,
+persists it to Open Notebook in a background task, and clears the stash. Skips
+ephemeral BACKGROUND contexts so internal background reasoning is not surfaced
+as user-visible notes.
 """
 
 from __future__ import annotations
@@ -13,10 +14,12 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from agent import LoopData
+from agent import AgentContextType, LoopData
 from helpers.defer import THREAD_BACKGROUND, DeferredTask
 from helpers.extension import Extension
 from helpers.print_style import PrintStyle
+
+REASONING_DATA_KEY = "_pmoves_notes_reasoning"
 
 
 def _enabled() -> bool:
@@ -36,6 +39,19 @@ def _notebook_api_url() -> str:
 
 def _notebook_token() -> str:
     return os.getenv("OPEN_NOTEBOOK_API_TOKEN", "")
+
+
+def _build_headers(api_url: str, token: str) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if token:
+        if api_url.lower().startswith("http://"):
+            PrintStyle(font_color="yellow").print(
+                "[PMOVES.Notes] WARNING: OPEN_NOTEBOOK_API_TOKEN is set but "
+                "OPEN_NOTEBOOK_API_URL uses plaintext http:// — the bearer token "
+                "will be sent unencrypted. Use https:// for non-internal endpoints."
+            )
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 async def _publish_nats_event(subject: str, data: dict[str, Any]) -> None:
@@ -65,24 +81,22 @@ async def _save_reasoning_trace(agent_name: str, reasoning: str) -> None:
         ),
         "tags": ["reasoning", "trace", agent_name.lower(), "memory"],
         "metadata": {
-            "source": "agent-zero-monologue",
+            "source": "agent-zero-reasoning-stream",
             "agent": agent_name,
             "timestamp": stamp.isoformat(),
             "type": "reasoning_trace",
         },
     }
 
-    headers = {"Content-Type": "application/json"}
-    token = _notebook_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    api_url = _notebook_api_url()
+    headers = _build_headers(api_url, _notebook_token())
 
     try:
         import aiohttp  # lazy import
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{_notebook_api_url()}/api/notes",
+                f"{api_url}/api/notes",
                 json=note,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=10),
@@ -100,10 +114,11 @@ async def _save_reasoning_trace(agent_name: str, reasoning: str) -> None:
         )
         return
 
+    note_id = result.get("id", "unknown") if isinstance(result, dict) else "unknown"
     await _publish_nats_event(
         "agent.notes.saved.v1",
         {
-            "note_id": result.get("id", "unknown"),
+            "note_id": note_id,
             "title": note["title"],
             "tags": ["reasoning", "trace"],
             "timestamp": stamp.isoformat(),
@@ -112,14 +127,20 @@ async def _save_reasoning_trace(agent_name: str, reasoning: str) -> None:
 
 
 class SaveReasoningTrace(Extension):
-    """Save the agent's reasoning trace to Open Notebook after each monologue."""
+    """Persist the captured reasoning trace to Open Notebook after the stream ends."""
 
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs) -> None:
         if not self.agent or not _enabled():
             return
+        # Skip ephemeral background contexts — do not surface internal reasoning.
+        if self.agent.context.type == AgentContextType.BACKGROUND:
+            return
 
-        reasoning = getattr(loop_data, "last_response", "") or ""
-        if len(reasoning) < _min_length():
+        reasoning = self.agent.get_data(REASONING_DATA_KEY) or ""
+        # Clear the stash regardless so traces never bleed across iterations.
+        self.agent.set_data(REASONING_DATA_KEY, None)
+
+        if not isinstance(reasoning, str) or len(reasoning) < _min_length():
             return
 
         agent_name = getattr(self.agent, "agent_name", "Agent")
