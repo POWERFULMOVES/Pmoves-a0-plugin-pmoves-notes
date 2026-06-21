@@ -15,22 +15,52 @@ This plugin enables Agent Zero to automatically save conversation summaries and 
 - **Tag-based categorization** for easy retrieval
 - **Full PMOVES.AI integration** (TensorZero, NATS, Open Notebook)
 
+## Plugin layout
+
+This repository is a self-contained Agent Zero plugin (repo root **is** the
+plugin root). It follows the standard plugin conventions so Agent Zero can
+discover its tools and extensions automatically:
+
+```text
+plugin.yaml                                              # manifest (name: pmoves_notes)
+README.md
+LICENSE
+requirements.txt
+tools/
+  save_note.py        -> class SaveNote(Tool)            # tool name: save_note
+  search_notes.py     -> class SearchNotes(Tool)         # tool name: search_notes
+extensions/
+  python/
+    message_loop_end/
+      _10_auto_save_conversation.py  -> AutoSaveConversation(Extension)
+    monologue_end/
+      _10_save_reasoning_trace.py    -> SaveReasoningTrace(Extension)
+```
+
+Tools subclass `helpers.tool.Tool` and implement `async def execute(...) -> Response`.
+Extensions subclass `helpers.extension.Extension`, live under
+`extensions/python/<point>/`, and persist notes in a background `DeferredTask`
+so they never block the agent loop.
+
 ## Installation
 
-### Via PMOVES-a0-plugins Index
+### Via the Agent Zero Plugin Hub (recommended)
 
-1. Ensure the plugin is indexed in `PMOVES-a0-plugins/plugins/pmoves-notes-integration/`
-2. Agent Zero will automatically discover and install it
+In Agent Zero → **Settings → Plugins → Install from Git**, paste this
+repository URL. Agent Zero validates `plugin.yaml`, installs the plugin into
+`usr/plugins/pmoves_notes/`, and loads its tools and extensions.
 
-### Manual Installation
+### Via the PMOVES-a0-plugins index
+
+The plugin is indexed in `PMOVES-a0-plugins/plugins/pmoves_notes/` (the index
+folder name must match the `name` field in this repo's `plugin.yaml`).
+
+### Manual installation
 
 ```bash
-# Clone this repository
-git clone https://github.com/POWERFULMOVES/a0-plugin-pmoves-notes.git
-
-# Copy to Agent Zero extensions directory
-cp -r a0-plugin-pmoves-notes/extensions/* PMOVES-Agent-Zero/python/extensions/
-cp -r a0-plugin-pmoves-notes/tools/* PMOVES-Agent-Zero/python/tools/
+git clone https://github.com/POWERFULMOVES/Pmoves-a0-plugin-pmoves-notes.git
+# Copy the whole plugin into the Agent Zero user plugins directory:
+cp -r Pmoves-a0-plugin-pmoves-notes /a0/usr/plugins/pmoves_notes
 ```
 
 ## Configuration
@@ -184,30 +214,15 @@ This plugin follows PMOVES.AI integration patterns:
 
 ## Development
 
-### Running Tests
+The plugin runs inside the Agent Zero runtime, which provides `helpers.tool`,
+`helpers.extension`, `helpers.defer`, `helpers.print_style`, and `aiohttp`. To
+exercise it, install it into a running Agent Zero (see Installation) and watch
+the agent logs while it converses — conversation summaries and reasoning traces
+appear in Open Notebook, and `save_note` / `search_notes` are available as tools.
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run tests
-pytest tests/
-
-# Run with coverage
-pytest --cov=extensions --cov=tools
-```
-
-### Docker Build
-
-```bash
-# Build the plugin image
-docker build -t a0-plugin-pmoves-notes:test .
-
-# Test with Agent Zero
-docker run --rm -v $(pwd):/plugin \
-  -e OPEN_NOTEBOOK_API_URL=http://host.docker.internal:8000 \
-  a0-plugin-pmoves-notes:test
-```
+Before contributing changes upstream, run Agent Zero's **a0-review-plugin**
+skill (4-phase audit: manifest, structure, code patterns, security + index) and
+resolve any FAIL items.
 
 ## Contributing
 

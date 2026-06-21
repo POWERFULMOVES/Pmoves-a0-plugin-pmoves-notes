@@ -1,12 +1,9 @@
-# PMOVES.Notes Plugin Requirements
+# PMOVES.Notes plugin runtime dependencies.
+#
+# aiohttp ships with the Agent Zero runtime (used by helpers/rfc.py,
+# helpers/mcp_handler.py, etc.), so it is normally already present.
+# nats-py is optional: NATS event publishing degrades gracefully (the plugin
+# logs a warning and continues) when it is not installed.
 
-# Async HTTP client for API calls
 aiohttp>=3.9.0
-
-# NATS client for event publishing
 nats-py>=2.7.0
-
-# Testing dependencies (dev only)
-pytest>=7.4.0
-pytest-aiohttp>=1.0.0
-pytest-cov>=4.1.0
