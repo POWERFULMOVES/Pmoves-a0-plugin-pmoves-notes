@@ -18,7 +18,7 @@ from helpers.tool import Response, Tool
 
 
 def _notebook_api_url() -> str:
-    return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:8000")
+    return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:5055")
 
 
 def _notebook_token() -> str:
@@ -80,15 +80,15 @@ class SaveNote(Tool):
             first_line = lines[0] if lines else content
             title = (first_line[:60] + "...") if len(first_line) > 60 else first_line
 
+        # Open Notebook's POST /api/notes accepts {content, title, note_type,
+        # notebook_id} only — there is no tags/metadata field. Fold tags into the
+        # note body so the categorization survives.
+        all_tags = tags + ["agent-created"]
+        body = content + "\n\n_tags: " + ", ".join(all_tags) + "_"
         note = {
+            "content": body,
             "title": title,
-            "content": content,
-            "tags": tags + ["agent-created"],
-            "metadata": {
-                "source": "agent-zero-tool",
-                "agent": getattr(self.agent, "agent_name", "agent"),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
+            "note_type": "human",
         }
 
         api_url = _notebook_api_url()

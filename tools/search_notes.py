@@ -17,7 +17,7 @@ from helpers.tool import Response, Tool
 
 
 def _notebook_api_url() -> str:
-    return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:8000")
+    return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:5055")
 
 
 def _notebook_token() -> str:
@@ -61,7 +61,6 @@ class SearchNotes(Tool):
         self,
         query: str = "",
         limit: int = 10,
-        tags: list[str] | None = None,
         **kwargs,
     ) -> Response:
         if query is None:
@@ -77,9 +76,16 @@ class SearchNotes(Tool):
             limit = int(limit)
         except (TypeError, ValueError):
             limit = 10
-        params: dict[str, object] = {"query": query, "limit": min(max(limit, 1), 50)}
-        if isinstance(tags, (list, tuple)) and tags:
-            params["tags"] = list(tags)
+
+        # Open Notebook search is POST /api/search (SearchRequest), not a notes
+        # sub-route. Scope to notes (not sources) and request text search.
+        payload = {
+            "query": query,
+            "type": "text",
+            "limit": min(max(limit, 1), 50),
+            "search_sources": False,
+            "search_notes": True,
+        }
 
         api_url = _notebook_api_url()
         headers = _build_headers(api_url, _notebook_token())
@@ -88,9 +94,9 @@ class SearchNotes(Tool):
             import aiohttp  # lazy import: keeps import errors out of tool discovery
 
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{api_url}/api/notes/search",
-                    params=params,
+                async with session.post(
+                    f"{api_url}/api/search",
+                    json=payload,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
@@ -115,17 +121,12 @@ class SearchNotes(Tool):
             content = n.get("content") or ""
             if not isinstance(content, str):
                 content = str(content)
-            metadata = n.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = {}
-            tags_value = n.get("tags", [])
             summary.append(
                 {
                     "id": n.get("id"),
                     "title": n.get("title"),
                     "snippet": (content[:200] + "...") if len(content) > 200 else content,
-                    "tags": tags_value if isinstance(tags_value, list) else [],
-                    "timestamp": metadata.get("timestamp"),
+                    "note_type": n.get("note_type"),
                 }
             )
 

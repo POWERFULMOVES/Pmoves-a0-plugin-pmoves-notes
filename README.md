@@ -85,7 +85,7 @@ cp -r Pmoves-a0-plugin-pmoves-notes /a0/usr/plugins/pmoves_notes
 
 | Variable | Required | Default | Description |
 |----------|-----------|---------|-------------|
-| `OPEN_NOTEBOOK_API_URL` | No | `http://open-notebook:8000` | Open Notebook API endpoint |
+| `OPEN_NOTEBOOK_API_URL` | No | `http://open-notebook:5055` | Open Notebook API endpoint |
 | `OPEN_NOTEBOOK_API_TOKEN` | No | | API token for authentication |
 | `NATS_URL` | No | `nats://nats:pmoves@nats:4222` | NATS connection URL |
 | `PMOVES_NOTES_ENABLED` | No | `true` | Enable/disable plugin |
@@ -98,7 +98,7 @@ services:
   agent-zero:
     image: ghcr.io/powerfulmoves/pmoves-agent-zero:pmoves-latest
     environment:
-      - OPEN_NOTEBOOK_API_URL=http://open-notebook:8000
+      - OPEN_NOTEBOOK_API_URL=http://open-notebook:5055
       - OPEN_NOTEBOOK_API_TOKEN=${OPEN_NOTEBOOK_TOKEN}
       - NATS_URL=nats://nats:pmoves@nats:4222
       - PMOVES_NOTES_ENABLED=true
@@ -149,20 +149,18 @@ Manually save a note to Open Notebook.
 
 ### search_notes
 
-Search the knowledge base for relevant notes.
+Run a text search over the knowledge base (`POST /api/search`, scoped to notes).
 
 ```python
 {
   "query": "Agent Zero integration patterns",
-  "limit": 10,
-  "tags": ["documentation"]
+  "limit": 10
 }
 ```
 
 **Parameters:**
 - `query` (required): Search query
-- `limit` (optional): Max results (default: 10)
-- `tags` (optional): Filter by tags
+- `limit` (optional): Max results (default: 10, max 50)
 
 **Returns:** List of matching notes with snippets
 
@@ -199,7 +197,7 @@ This plugin follows PMOVES.AI integration patterns:
 
 1. **TensorZero**: Uses TensorZero format for any LLM calls (if added)
 2. **NATS**: Authenticated NATS URL (`nats://nats:pmoves@nats:4222`)
-3. **Open Notebook**: Connects to SurrealDB knowledge base at port 8000
+3. **Open Notebook**: Connects to SurrealDB knowledge base at port 5055
 4. **Security**: No hardcoded credentials; uses environment variables
 5. **Observability**: Publishes events for service mesh monitoring
 

@@ -26,7 +26,7 @@ def _enabled() -> bool:
 
 
 def _notebook_api_url() -> str:
-    return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:8000")
+    return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:5055")
 
 
 def _notebook_token() -> str:
@@ -57,15 +57,14 @@ async def _save_conversation(agent_name: str, content: str) -> None:
     title = f"Conversation with {agent_name}: " + (
         (first_line[:50] + "...") if len(first_line) > 50 else first_line
     )
+    # Open Notebook POST /api/notes accepts {content, title, note_type} only.
+    # These summaries are machine-generated -> note_type "ai". Tags are folded
+    # into the body since the notes API has no tags field.
+    body = content + "\n\n_tags: conversation, auto-saved, " + agent_name.lower() + "_"
     note = {
+        "content": body,
         "title": title,
-        "content": content,
-        "tags": ["conversation", "auto-saved", agent_name.lower()],
-        "metadata": {
-            "source": "agent-zero",
-            "agent": agent_name,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
+        "note_type": "ai",
     }
 
     api_url = _notebook_api_url()
