@@ -34,7 +34,7 @@ def _min_length() -> int:
 
 
 def _notebook_api_url() -> str:
-    return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:8000")
+    return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:5055")
 
 
 def _notebook_token() -> str:
@@ -71,21 +71,18 @@ async def _publish_nats_event(subject: str, data: dict[str, Any]) -> None:
 
 async def _save_reasoning_trace(agent_name: str, reasoning: str) -> None:
     stamp = datetime.now(timezone.utc)
+    # Open Notebook POST /api/notes accepts {content, title, note_type} only.
+    # Reasoning traces are machine-generated -> note_type "ai"; tags fold into body.
     note = {
         "title": f"Reasoning Trace — {agent_name} — {stamp.strftime('%Y-%m-%d %H:%M')}",
         "content": (
             f"# Agent Reasoning Trace\n\n"
             f"**Agent**: {agent_name}\n"
             f"**Timestamp**: {stamp.isoformat()}\n\n"
-            f"## Reasoning\n\n{reasoning}\n"
+            f"## Reasoning\n\n{reasoning}\n\n"
+            f"_tags: reasoning, trace, {agent_name.lower()}, memory_"
         ),
-        "tags": ["reasoning", "trace", agent_name.lower(), "memory"],
-        "metadata": {
-            "source": "agent-zero-reasoning-stream",
-            "agent": agent_name,
-            "timestamp": stamp.isoformat(),
-            "type": "reasoning_trace",
-        },
+        "note_type": "ai",
     }
 
     api_url = _notebook_api_url()
