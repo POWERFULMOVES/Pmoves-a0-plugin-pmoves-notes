@@ -1,133 +1,142 @@
-"""
-PMOVES.Notes Tool - Search notes in Open Notebook.
+"""PMOVES.Notes tool — search notes in Open Notebook.
 
-This tool allows agents to search the persistent knowledge base.
+Conforms to the Agent Zero tool API: subclass ``helpers.tool.Tool`` and
+implement ``async def execute(...) -> Response``. Discovered by file name
+(``tools/search_notes.py`` -> tool name ``search_notes``).
 """
 
+from __future__ import annotations
+
+import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
+from helpers.print_style import PrintStyle
+from helpers.tool import Response, Tool
 
-def get_notebook_api_url() -> str:
-    """Get Open Notebook API URL from environment."""
+
+def _notebook_api_url() -> str:
     return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:8000")
 
 
-def get_notebook_token() -> str:
-    """Get Open Notebook API token from environment."""
-    token = os.getenv("OPEN_NOTEBOOK_API_TOKEN", "")
-    return token if token else ""
+def _notebook_token() -> str:
+    return os.getenv("OPEN_NOTEBOOK_API_TOKEN", "")
 
 
-class Tool:
-    """Tool for searching notes in Open Notebook."""
+def _build_headers(api_url: str, token: str) -> dict[str, str]:
+    """Build request headers, warning if a token would be sent over plaintext HTTP."""
+    headers = {"Content-Type": "application/json"}
+    if token:
+        if api_url.lower().startswith("http://"):
+            PrintStyle(font_color="yellow").print(
+                "[PMOVES.Notes] WARNING: OPEN_NOTEBOOK_API_TOKEN is set but "
+                "OPEN_NOTEBOOK_API_URL uses plaintext http:// — the bearer token "
+                "will be sent unencrypted. Use https:// for non-internal endpoints."
+            )
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
-    @property
-    def definition(self):
-        return {
-            "name": "search_notes",
-            "description": "Search PMOVES.AI Open Notebook (persistent knowledge base) for notes",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query to find relevant notes"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return (default: 10)",
-                        "default": 10
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional filter by tags (e.g., ['research', 'conversation'])"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
 
-    async def execute(self, **kwargs):
-        """Execute the tool - search notes in Open Notebook."""
-        import aiohttp
+async def publish_nats_event(subject: str, data: dict[str, Any]) -> None:
+    """Best-effort NATS publish; never raises into the caller."""
+    try:
+        import nats  # lazy import: optional dependency
 
-        query = kwargs.get("query", "")
-        limit = kwargs.get("limit", 10)
-        tags = kwargs.get("tags", [])
+        nc = await nats.connect(os.getenv("NATS_URL", "nats://nats:pmoves@nats:4222"))
+        try:
+            await nc.publish(subject, json.dumps(data).encode())
+        finally:
+            await nc.close()
+    except Exception as exc:  # noqa: BLE001 — event publishing is best-effort
+        PrintStyle(font_color="yellow").print(
+            f"[PMOVES.Notes] NATS publish to {subject} failed: {exc}"
+        )
 
+
+class SearchNotes(Tool):
+    """Search PMOVES.AI Open Notebook (persistent knowledge base) for notes."""
+
+    async def execute(
+        self,
+        query: str = "",
+        limit: int = 10,
+        tags: list[str] | None = None,
+        **kwargs,
+    ) -> Response:
+        if query is None:
+            query = ""
+        query = query if isinstance(query, str) else str(query)
+        query = query.strip()
         if not query:
-            return {
-                "success": False,
-                "error": "Query is required"
-            }
-
-        api_url = get_notebook_api_url()
-        token = get_notebook_token()
-
-        headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        # Build search request
-        search_params = {
-            "query": query,
-            "limit": min(limit, 50)  # Cap at 50
-        }
-
-        if tags:
-            search_params["tags"] = tags
+            return Response(
+                message="search_notes error: 'query' is required.", break_loop=False
+            )
 
         try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 10
+        params: dict[str, object] = {"query": query, "limit": min(max(limit, 1), 50)}
+        if isinstance(tags, (list, tuple)) and tags:
+            params["tags"] = list(tags)
+
+        api_url = _notebook_api_url()
+        headers = _build_headers(api_url, _notebook_token())
+
+        try:
+            import aiohttp  # lazy import: keeps import errors out of tool discovery
+
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     f"{api_url}/api/notes/search",
-                    params=search_params,
+                    params=params,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if response.status == 200:
-                        results = await response.json()
-                        notes = results.get("results", [])
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        detail = await resp.text()
+                        return Response(
+                            message=f"search_notes failed: HTTP {resp.status} — {detail}",
+                            break_loop=False,
+                        )
+                    results = await resp.json()
+        except Exception as exc:  # noqa: BLE001 — surface as tool message, never crash loop
+            return Response(message=f"search_notes error: {exc}", break_loop=False)
 
-                        # Publish NATS event
-                        try:
-                            import nats
-                            from datetime import datetime
-                            nc = await nats.connect(os.getenv("NATS_URL", "nats://nats:pmoves@nats:4222"))
-                            await nc.publish("agent.notes.searched.v1", json.dumps({
-                                "query": query,
-                                "results_count": len(notes),
-                                "timestamp": datetime.utcnow().isoformat()
-                            }).encode())
-                            await nc.close()
-                        except Exception as e:
-                            print(f"[PMOVES.Notes] Failed to publish NATS event: {e}")
+        raw_notes = results.get("results", []) if isinstance(results, dict) else []
+        if not isinstance(raw_notes, list):
+            raw_notes = []
 
-                        return {
-                            "success": True,
-                            "query": query,
-                            "count": len(notes),
-                            "results": [
-                                {
-                                    "id": note.get("id"),
-                                    "title": note.get("title"),
-                                    "snippet": note.get("content", "")[:200] + "..." if len(note.get("content", "")) > 200 else note.get("content", ""),
-                                    "tags": note.get("tags", []),
-                                    "timestamp": note.get("metadata", {}).get("timestamp")
-                                }
-                                for note in notes
-                            ]
-                        }
-                    else:
-                        error_text = await response.text()
-                        return {
-                            "success": False,
-                            "error": f"Search failed: {response.status} - {error_text}"
-                        }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Exception occurred: {str(e)}"
-            }
+        summary = []
+        for n in raw_notes:
+            if not isinstance(n, dict):
+                continue
+            content = n.get("content") or ""
+            if not isinstance(content, str):
+                content = str(content)
+            metadata = n.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            tags_value = n.get("tags", [])
+            summary.append(
+                {
+                    "id": n.get("id"),
+                    "title": n.get("title"),
+                    "snippet": (content[:200] + "...") if len(content) > 200 else content,
+                    "tags": tags_value if isinstance(tags_value, list) else [],
+                    "timestamp": metadata.get("timestamp"),
+                }
+            )
+
+        await publish_nats_event(
+            "agent.notes.searched.v1",
+            {
+                "query": query,
+                "results_count": len(summary),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+        body = json.dumps({"query": query, "count": len(summary), "results": summary}, indent=2)
+        return Response(message=f"search_notes results:\n{body}", break_loop=False)

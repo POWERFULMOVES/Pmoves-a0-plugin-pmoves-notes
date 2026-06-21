@@ -1,76 +1,84 @@
-"""
-PMOVES.Notes Tool - Save a note to Open Notebook.
+"""PMOVES.Notes tool — save a note to Open Notebook.
 
-This tool allows agents to manually save notes to the persistent knowledge base.
+Conforms to the Agent Zero tool API: subclass ``helpers.tool.Tool`` and
+implement ``async def execute(...) -> Response``. Agent Zero discovers this
+tool by file name (``tools/save_note.py`` -> tool name ``save_note``) and loads
+the first class in the file that subclasses ``Tool``.
 """
+
+from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
+from helpers.print_style import PrintStyle
+from helpers.tool import Response, Tool
 
-def get_notebook_api_url() -> str:
-    """Get Open Notebook API URL from environment."""
+
+def _notebook_api_url() -> str:
     return os.getenv("OPEN_NOTEBOOK_API_URL", "http://open-notebook:8000")
 
 
-def get_notebook_token() -> str:
-    """Get Open Notebook API token from environment."""
-    token = os.getenv("OPEN_NOTEBOOK_API_TOKEN", "")
-    return token if token else ""
+def _notebook_token() -> str:
+    return os.getenv("OPEN_NOTEBOOK_API_TOKEN", "")
 
 
-class Tool:
-    """Tool for saving notes to Open Notebook."""
+def _build_headers(api_url: str, token: str) -> dict[str, str]:
+    """Build request headers, warning if a token would be sent over plaintext HTTP."""
+    headers = {"Content-Type": "application/json"}
+    if token:
+        if api_url.lower().startswith("http://"):
+            PrintStyle(font_color="yellow").print(
+                "[PMOVES.Notes] WARNING: OPEN_NOTEBOOK_API_TOKEN is set but "
+                "OPEN_NOTEBOOK_API_URL uses plaintext http:// — the bearer token "
+                "will be sent unencrypted. Use https:// for non-internal endpoints."
+            )
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
-    @property
-    def definition(self):
-        return {
-            "name": "save_note",
-            "description": "Save a note to PMOVES.AI Open Notebook (persistent knowledge base)",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The note content to save"
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Optional title for the note (defaults to first line of content)"
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional tags for categorization (e.g., ['research', 'todo'])"
-                    }
-                },
-                "required": ["content"]
-            }
-        }
 
-    async def execute(self, **kwargs):
-        """Execute the tool - save note to Open Notebook."""
-        import aiohttp
+async def publish_nats_event(subject: str, data: dict[str, Any]) -> None:
+    """Best-effort NATS publish; never raises into the caller."""
+    try:
+        import nats  # lazy import: optional dependency
 
-        content = kwargs.get("content", "")
-        title = kwargs.get("title", "")
-        tags = kwargs.get("tags", [])
+        nc = await nats.connect(os.getenv("NATS_URL", "nats://nats:pmoves@nats:4222"))
+        try:
+            await nc.publish(subject, json.dumps(data).encode())
+        finally:
+            await nc.close()
+    except Exception as exc:  # noqa: BLE001 — event publishing is best-effort
+        PrintStyle(font_color="yellow").print(
+            f"[PMOVES.Notes] NATS publish to {subject} failed: {exc}"
+        )
 
-        if not content:
-            return {
-                "success": False,
-                "error": "Content is required"
-            }
 
-        # Generate title from content if not provided
+class SaveNote(Tool):
+    """Save a note to PMOVES.AI Open Notebook (persistent knowledge base)."""
+
+    async def execute(
+        self,
+        content: str = "",
+        title: str = "",
+        tags: list[str] | None = None,
+        **kwargs,
+    ) -> Response:
+        if content is None:
+            content = ""
+        content = content if isinstance(content, str) else str(content)
+        if not content.strip():
+            return Response(
+                message="save_note error: 'content' is required.", break_loop=False
+            )
+
+        tags = list(tags) if isinstance(tags, (list, tuple)) else []
+
         if not title:
-            first_line = content.split("\n")[0]
-            title = first_line[:60] + "..." if len(first_line) > 60 else first_line
-
-        api_url = get_notebook_api_url()
-        token = get_notebook_token()
+            lines = content.splitlines()
+            first_line = lines[0] if lines else content
+            title = (first_line[:60] + "...") if len(first_line) > 60 else first_line
 
         note = {
             "title": title,
@@ -78,53 +86,52 @@ class Tool:
             "tags": tags + ["agent-created"],
             "metadata": {
                 "source": "agent-zero-tool",
-                "timestamp": datetime.utcnow().isoformat()
-            }
+                "agent": getattr(self.agent, "agent_name", "agent"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
         }
 
-        headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        api_url = _notebook_api_url()
+        headers = _build_headers(api_url, _notebook_token())
 
         try:
+            import aiohttp  # lazy import: keeps import errors out of tool discovery
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{api_url}/api/notes",
                     json=note,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        detail = await resp.text()
+                        return Response(
+                            message=f"save_note failed: HTTP {resp.status} — {detail}",
+                            break_loop=False,
+                        )
+                    result = await resp.json()
+        except Exception as exc:  # noqa: BLE001 — surface as tool message, never crash loop
+            return Response(message=f"save_note error: {exc}", break_loop=False)
 
-                        # Publish NATS event
-                        try:
-                            import nats
-                            nc = await nats.connect(os.getenv("NATS_URL", "nats://nats:pmoves@nats:4222"))
-                            await nc.publish("agent.notes.saved.v1", json.dumps({
-                                "note_id": result.get("id", "unknown"),
-                                "title": title,
-                                "tags": tags,
-                                "timestamp": datetime.utcnow().isoformat()
-                            }).encode())
-                            await nc.close()
-                        except Exception as e:
-                            print(f"[PMOVES.Notes] Failed to publish NATS event: {e}")
+        if not isinstance(result, dict):
+            return Response(
+                message="save_note failed: unexpected response shape (expected JSON object).",
+                break_loop=False,
+            )
 
-                        return {
-                            "success": True,
-                            "note_id": result.get("id"),
-                            "title": title,
-                            "message": f"Note saved successfully with ID: {result.get('id')}"
-                        }
-                    else:
-                        error_text = await response.text()
-                        return {
-                            "success": False,
-                            "error": f"Failed to save note: {response.status} - {error_text}"
-                        }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Exception occurred: {str(e)}"
-            }
+        note_id = result.get("id", "unknown")
+        await publish_nats_event(
+            "agent.notes.saved.v1",
+            {
+                "note_id": note_id,
+                "title": title,
+                "tags": tags,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+        return Response(
+            message=f"Note saved to Open Notebook (id={note_id}, title={title!r}).",
+            break_loop=False,
+        )

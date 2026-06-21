@@ -15,22 +15,68 @@ This plugin enables Agent Zero to automatically save conversation summaries and 
 - **Tag-based categorization** for easy retrieval
 - **Full PMOVES.AI integration** (TensorZero, NATS, Open Notebook)
 
+## Plugin layout
+
+This repository is a self-contained Agent Zero plugin (repo root **is** the
+plugin root). It follows the standard plugin conventions so Agent Zero can
+discover its tools and extensions automatically:
+
+```text
+plugin.yaml                                              # manifest (name: pmoves_notes)
+README.md
+LICENSE
+requirements.txt
+prompts/
+  agent.system.tool.pmoves_notes.md                     # advertises save_note / search_notes to the model
+tools/
+  save_note.py        -> class SaveNote(Tool)            # tool name: save_note
+  search_notes.py     -> class SearchNotes(Tool)         # tool name: search_notes
+extensions/
+  python/
+    message_loop_end/
+      _10_auto_save_conversation.py    -> AutoSaveConversation(Extension)
+    reasoning_stream/
+      _50_capture_reasoning.py         -> CaptureReasoning(Extension)
+    reasoning_stream_end/
+      _50_save_reasoning_trace.py      -> SaveReasoningTrace(Extension)
+```
+
+Tools subclass `helpers.tool.Tool` and implement `async def execute(...) -> Response`,
+and are advertised to the model via `prompts/agent.system.tool.pmoves_notes.md`.
+Extensions subclass `helpers.extension.Extension`, live under
+`extensions/python/<point>/`, and persist notes in a background `DeferredTask`
+so they never block the agent loop. Reasoning is captured at `reasoning_stream`
+(the chain-of-thought source) and persisted at `reasoning_stream_end` — not from
+`loop_data.last_response`, which is the agent's response, not its reasoning.
+
 ## Installation
 
-### Via PMOVES-a0-plugins Index
+### Via the Agent Zero Plugin Hub (recommended)
 
-1. Ensure the plugin is indexed in `PMOVES-a0-plugins/plugins/pmoves-notes-integration/`
-2. Agent Zero will automatically discover and install it
+In Agent Zero → **Settings → Plugins → Install from Git**, paste this
+repository URL. Agent Zero validates `plugin.yaml`, installs the plugin into
+`usr/plugins/pmoves_notes/`, and loads its tools and extensions.
 
-### Manual Installation
+### Via the PMOVES plugin index (internal)
+
+This plugin is listed in the **PMOVES** fork index at
+[POWERFULMOVES/PMOVES-a0-plugins](https://github.com/POWERFULMOVES/PMOVES-a0-plugins)
+under `plugins/pmoves_notes/` — a PMOVES-internal staging index, not the
+community-maintained channel. The index folder name must match the `name` field
+in this repo's `plugin.yaml`.
+
+To make the plugin discoverable to **all** Agent Zero users, submit it to the
+official community index at [agent0ai/a0-plugins](https://github.com/agent0ai/a0-plugins):
+fork that repo, add `plugins/pmoves_notes/index.yaml` pointing at this
+repository, and open a PR (its CI validates that the remote `plugin.yaml` `name`
+exactly matches the folder name).
+
+### Manual installation
 
 ```bash
-# Clone this repository
-git clone https://github.com/POWERFULMOVES/a0-plugin-pmoves-notes.git
-
-# Copy to Agent Zero extensions directory
-cp -r a0-plugin-pmoves-notes/extensions/* PMOVES-Agent-Zero/python/extensions/
-cp -r a0-plugin-pmoves-notes/tools/* PMOVES-Agent-Zero/python/tools/
+git clone https://github.com/POWERFULMOVES/Pmoves-a0-plugin-pmoves-notes.git
+# Copy the whole plugin into the Agent Zero user plugins directory:
+cp -r Pmoves-a0-plugin-pmoves-notes /a0/usr/plugins/pmoves_notes
 ```
 
 ## Configuration
@@ -63,26 +109,20 @@ services:
 
 ## Extension Points
 
-### message_loop_end (Priority: 10)
+### message_loop_end
 
-Automatically saves conversation summaries after each message loop.
-
-**Captures:**
-- Recent messages (last 10)
-- Agent name
-- Conversation context
+Automatically saves a conversation summary after each message loop, sourced from
+`self.agent.history.output_text()`. `BACKGROUND` contexts are skipped.
 
 **Tags applied:** `conversation`, `auto-saved`, `<agent_name>`
 
-### monologue_end (Priority: 10)
+### reasoning_stream + reasoning_stream_end
 
-Saves agent reasoning traces to persistent memory.
-
-**Captures:**
-- Monologue/reasoning text
-- Agent name
-- Tool usage
-- Input context
+Captures the agent's chain-of-thought and persists it as a reasoning trace.
+`reasoning_stream` (`_50_capture_reasoning.py`) stashes the full reasoning text
+on the agent; `reasoning_stream_end` (`_50_save_reasoning_trace.py`) persists it
+(when it exceeds `PMOVES_NOTES_MIN_REASONING_LENGTH`) and clears the stash.
+`BACKGROUND` contexts are skipped so internal reasoning is not surfaced.
 
 **Tags applied:** `reasoning`, `trace`, `<agent_name>`, `memory`
 
@@ -169,7 +209,7 @@ This plugin follows PMOVES.AI integration patterns:
 # In Agent Zero, the plugin automatically saves conversations
 
 # User: "Research PMOVES.AI integration patterns"
-# Agent: [Reasoning...] [Saves reasoning trace via monologue_end extension]
+# Agent: [Reasoning...] [Saves reasoning trace via reasoning_stream_end extension]
 # Agent: [Provides answer]
 # [Message loop ends → Auto-saves conversation summary via message_loop_end extension]
 
@@ -184,30 +224,15 @@ This plugin follows PMOVES.AI integration patterns:
 
 ## Development
 
-### Running Tests
+The plugin runs inside the Agent Zero runtime, which provides `helpers.tool`,
+`helpers.extension`, `helpers.defer`, `helpers.print_style`, and `aiohttp`. To
+exercise it, install it into a running Agent Zero (see Installation) and watch
+the agent logs while it converses — conversation summaries and reasoning traces
+appear in Open Notebook, and `save_note` / `search_notes` are available as tools.
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run tests
-pytest tests/
-
-# Run with coverage
-pytest --cov=extensions --cov=tools
-```
-
-### Docker Build
-
-```bash
-# Build the plugin image
-docker build -t a0-plugin-pmoves-notes:test .
-
-# Test with Agent Zero
-docker run --rm -v $(pwd):/plugin \
-  -e OPEN_NOTEBOOK_API_URL=http://host.docker.internal:8000 \
-  a0-plugin-pmoves-notes:test
-```
+Before contributing changes upstream, run Agent Zero's **a0-review-plugin**
+skill (4-phase audit: manifest, structure, code patterns, security + index) and
+resolve any FAIL items.
 
 ## Contributing
 
